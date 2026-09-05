@@ -1,0 +1,118 @@
+name: Frontend Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "starter/frontend/**"
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "starter/frontend/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: "starter/frontend/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test -- --watchAll=false
+
+  build-and-push:
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+          REACT_APP_MOVIE_API_URL: http://a97a287c4757d4c4fbbecaadbe24816d-1711442687.us-east-1.elb.amazonaws.com
+        run: |
+          docker build \
+            --build-arg REACT_APP_MOVIE_API_URL=$REACT_APP_MOVIE_API_URL \
+            -t $ECR_REGISTRY/frontend:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/frontend:$IMAGE_TAG
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region us-east-1 --name cluster
+
+      - name: Deploy frontend
+        env:
+          ECR_REGISTRY: 813685111302.dkr.ecr.us-east-1.amazonaws.com
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          kubectl apply -k starter/frontend/k8s
+          kubectl -n default set image deployment/frontend frontend=$ECR_REGISTRY/frontend:$IMAGE_TAG
+          kubectl -n default rollout status deployment/frontend --timeout=180s
